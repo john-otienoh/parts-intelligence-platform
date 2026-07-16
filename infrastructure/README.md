@@ -59,4 +59,3 @@ Detailed deployment guide: [docs/deployment.md](../docs/deployment.md)
 - PostgreSQL: `pg_dump` scheduled via cron, stored in S3 (or volume)
 - Redis: AOF persistence enabled
 - Configuration: backed up via Git and volume snapshots
-```

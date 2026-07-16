@@ -32,4 +32,3 @@ pip install mkdocs-material
 mkdocs serve
 ```
 Open `http://localhost:8001` to view the full documentation site.
-```

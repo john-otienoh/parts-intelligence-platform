@@ -75,4 +75,3 @@ Scraper settings (timeouts, concurrency, user agent) are in `scraper/config.py`.
 ## Adding a New Marketplace
 
 Implement a new Spider class inheriting from `BaseSpider` and register it in the controller. See `spiders/_template.py` for guidance.
-```

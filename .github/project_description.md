@@ -23,4 +23,3 @@ On merge to `main`:
 3. Deploy to staging environment (automated) and production (manual approval)
 
 Workflow files are located in `.github/workflows/`.
-```

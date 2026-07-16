@@ -73,4 +73,3 @@ python warehouse/pipeline.py --full
 ```
 
 Monitor via Airflow UI at `http://localhost:8080`.
-```

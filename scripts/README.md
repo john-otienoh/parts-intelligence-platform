@@ -19,4 +19,3 @@ python scripts/generate_erd.py > docs/erd.png
 ```
 
 Always run these scripts from the repository root and ensure the virtual environment is active.
-```

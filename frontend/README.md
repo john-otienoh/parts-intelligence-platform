@@ -64,4 +64,3 @@ npm start
 ## Configuration
 
 API base URL and other settings are in `frontend/.env.local`.
-```

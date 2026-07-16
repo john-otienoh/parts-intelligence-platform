@@ -16,4 +16,3 @@ python scripts/seed_database.py --dataset datasets/bronze_sample.csv
 ```
 
 Note: Do not commit real production data. All sample files should be anonymized and small in size.
-```

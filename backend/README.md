@@ -75,4 +75,3 @@ Environment variables are defined in `.env` (see `.env.example`). Critical setti
 - [API Specification](http://localhost:8000/redoc)
 - [Database Schema](../warehouse/README.md)
 - [Search Service Architecture](search/README.md) (future)
-```
