@@ -216,3 +216,102 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+dist/
+build/
+eggs/
+*.egg
+.eggs/
+pip-wheel-metadata/
+*.whl
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env
+.venv*
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# PyCharm / IntelliJ IDEA
+.idea/
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# mypy
+.mypy_cache/
+
+# Pytest cache
+.pytest_cache/
+
+# Coverage
+.coverage
+htmlcov/
+coverage.xml
+
+# Sphinx / MkDocs build
+docs/_build/
+site/
+
+# --- Environment & secrets ---
+.env
+.env.*
+!.env.example
+*.env.local
+secrets/
+*.key
+*.pem
+
+# --- Data & media ---
+data/
+datasets/raw/
+datasets/sample/
+!datasets/sample_listings.json
+media/
+uploads/
+logs/
+*.log
+*.db
+*.sqlite3
+
+# --- Docker ---
+.docker/
+docker-compose.override.yml
+*.tar
+*.tar.gz
+
+# --- Node / Frontend ---
+node_modules/
+frontend/.next/
+frontend/out/
+frontend/dist/
+frontend/build/
+*.tsbuildinfo
+next-env.d.ts
+
+# --- OS files ---
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# --- Project specific ---
+scraper/html_cache/
+scraper/data/raw/
+warehouse/dbt/logs/
+warehouse/dbt/target/
+warehouse/airflow/logs/
+warehouse/airflow/dags/__pycache__/
+ml/models/
+ml/mlruns/
+ml/feature_store/

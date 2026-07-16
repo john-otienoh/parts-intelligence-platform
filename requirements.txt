@@ -1,0 +1,79 @@
+# pip install -r requirements.txt
+
+# Backend (FastAPI)
+fastapi
+uvicorn[standard]
+sqlalchemy
+alembic
+pydantic
+pydantic-settings
+python-jose[cryptography]
+passlib[bcrypt]
+python-multipart
+httpx
+
+# Background tasks
+celery
+redis
+flower
+
+# Database driver
+asyncpg
+psycopg2-binary
+
+# Scraper
+playwright
+beautifulsoup4
+lxml
+aiohttp
+pandas
+
+# Data Engineering (Warehouse)
+pandas
+polars
+numpy
+pyarrow
+sqlalchemy
+dbt-postgres
+apache-airflow
+great-expectations
+pandera
+
+# Machine Learning
+scikit-learn
+xgboost
+lightgbm
+catboost
+mlflow
+shap
+sentence-transformers
+faiss-cpu
+spacy
+
+# Analytics & Visualization
+streamlit
+plotly
+matplotlib
+seaborn
+
+# Utilities
+pyyaml
+python-dotenv
+loguru
+tqdm
+pydantic
+click
+
+# Development & Testing
+pytestnt
+pytest-asyncio
+pytest-cov
+factory-boy
+faker
+locust
+bandit
+ruff
+black
+isort
+mypy
+pre-commit
