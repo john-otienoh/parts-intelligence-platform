@@ -1,10 +1,3 @@
-I'll create a comprehensive set of README files based on the project's modular structure. The root `README.md` will serve as a high-level overview, while each core directory will contain a detailed README covering its specific purpose, architecture, and usage. Additional files such as `CONTRIBUTING.md`, `.env.example`, and a `docs/` index will also be generated.
-
----
-
-### Root README.md (General Summary)
-
-```markdown
 # AutoIntel
 
 ### Production-Grade Automotive Parts Market Intelligence Platform
