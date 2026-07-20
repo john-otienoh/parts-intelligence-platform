@@ -11,6 +11,8 @@
 ![Airflow](https://img.shields.io/badge/Airflow-3.x-017CEE?style=for-the-badge&logo=apacheairflow&logoColor=white)
 ![dbt](https://img.shields.io/badge/dbt-Latest-FF694B?style=for-the-badge&logo=dbt&logoColor=white)
 ![Redis](https://img.shields.io/badge/Redis-Latest-DC382D?style=for-the-badge&logo=redis&logoColor=white)
+![Django](https://img.shields.io/badge/Django-Latest-DC382D?style=for-the-badge&logo=django&logoColor=white)
+
 
 ---
 

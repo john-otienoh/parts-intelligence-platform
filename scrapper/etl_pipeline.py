@@ -10,7 +10,6 @@ Flow:
   6. Refresh Gold materialised views.
   7. Emit change summary (rows inserted per table).
 """
-
 from __future__ import annotations
 
 import sys
@@ -18,6 +17,7 @@ from datetime import datetime, timezone
 from typing import Dict, List
 
 from sqlalchemy import text
+
 from config import Config
 from database import PostgresStore
 from logger import get_logger
@@ -68,7 +68,7 @@ class ETLPipeline:
 
         # 4. Refresh gold
         self._refresh_gold()
-        metrics["gold_refreshed"] = 2
+        metrics["gold_refreshed"] = 4            # updated to actual count
 
         elapsed = (datetime.now(timezone.utc) - started).total_seconds()
         logger.info(
@@ -109,6 +109,7 @@ class ETLPipeline:
                 metrics["bronze"] += 1
 
                 specs = listing.specifications or {}
+
                 # Silver: parts
                 sess.execute(
                     text(
@@ -128,19 +129,19 @@ class ETLPipeline:
                         "ts": listing.scraped_at,
                         "url": listing.url,
                         "title": specs.get("Product Name"),
-                        "cond": specs.get("Condition"),
-                        "make": specs.get("Make"),
-                        "model": specs.get("Model"),
+                        "cond": None if specs.get("Condition") == "-" else specs.get("Condition"),
+                        "make": None if specs.get("Make") == "-" else specs.get("Make"),
+                        "model": None if specs.get("Model") == "-" else specs.get("Model"),
                         "prod": specs.get("Product Name"),
-                        "code": specs.get("Model Code"),
-                        "reg": specs.get("Reg. Year/month"),
-                        "mile": specs.get("Mileage"),
-                        "eng_m": specs.get("Engine Model"),
-                        "eng_s": specs.get("Engine Size"),
-                        "fuel": specs.get("Fuel"),
-                        "drive": specs.get("Drive"),
-                        "trans": specs.get("Mission Type"),
-                        "genuine": specs.get("Genuine Parts No."),
+                        "code": None if specs.get("Model Code") == "-" else specs.get("Model Code"),
+                        "reg": None if specs.get("Reg. Year/month") == "-" else specs.get("Reg. Year/month"),
+                        "mile": None if specs.get("Mileage") == "-" else specs.get("Mileage"),
+                        "eng_m": None if specs.get("Engine Model") == "-" else specs.get("Engine Model"),
+                        "eng_s": None if specs.get("Engine Size") == "-" else specs.get("Engine Size"),
+                        "fuel": None if specs.get("Fuel") == "-" else specs.get("Fuel"),
+                        "drive": None if specs.get("Drive") == "-" else specs.get("Drive"),
+                        "trans": None if specs.get("Mission Type") == "-" else specs.get("Mission Type"),
+                        "genuine": None if specs.get("Genuine Parts No.") == "-" else specs.get("Genuine Parts No."),
                         "desc": listing.description,
                         "view": listing.people_viewing_now,
                     },
@@ -231,11 +232,7 @@ class ETLPipeline:
                         text(
                             "INSERT INTO silver.images (ref_no, scraped_at, image_url) VALUES (:ref, :ts, :img)"
                         ),
-                        {
-                            "ref": listing.ref_no,
-                            "ts": listing.scraped_at,
-                            "img": img_url,
-                        },
+                        {"ref": listing.ref_no, "ts": listing.scraped_at, "img": img_url},
                     )
                     metrics["silver_images"] += 1
 
@@ -273,7 +270,7 @@ class ETLPipeline:
             sess.execute(text("REFRESH MATERIALIZED VIEW gold.shipping_summary"))
             sess.execute(text("REFRESH MATERIALIZED VIEW gold.daily_price_summary"))
             sess.execute(text("REFRESH MATERIALIZED VIEW gold.shipping_cost_by_port"))
-            logger.info("Gold materialised views refreshed.")
+        logger.info("Gold materialised views refreshed.")
 
 
 def main() -> int:
@@ -282,7 +279,6 @@ def main() -> int:
     with ScraperClient(cfg) as client:
         pipeline = ETLPipeline(cfg, store, client)
         metrics = pipeline.run()
-    # Final summary line — easy to grep from log file
     logger.info(f"ETL_SUMMARY | metrics={metrics}")
     return 0
 

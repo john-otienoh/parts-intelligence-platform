@@ -315,3 +315,9 @@ warehouse/airflow/dags/__pycache__/
 ml/models/
 ml/mlruns/
 ml/feature_store/
+
+data/
+logs/
+__pycache__/
+*.pyc
+.env

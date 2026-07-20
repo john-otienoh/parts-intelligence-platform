@@ -1,0 +1,1492 @@
+PARTSFLOW BACKEND (JUNIOR) - "AUTO PARTS REST API" - COMPLETE CODE
+FastAPI + DuckDB. Everything below is one file per `FILE:` marker — create
+the folders shown and paste each section into the matching path.
+
+ASSUMPTION: you said the data is saved in DuckDB but not the exact table
+shape, so this deliverable defines that schema explicitly (scripts/init_duckdb_schema.sql)
+and a loader (scripts/load_duckdb.py) that maps your JSON 1:1 onto it. If
+you already have differently-named tables, point db.py's DUCKDB_PATH at
+your file and adjust the SELECT column lists in app/routers/*.py to match.
+
+PROJECT STRUCTURE
+------------------------------------------------------------------------------
+partsflow-backend-junior/
+├── docker-compose.yml
+├── Dockerfile
+├── docker-entrypoint.sh
+├── requirements.txt
+├── .env.example
+├── data/
+│   └── sample_parts.json
+├── scripts/
+│   ├── __init__.py
+│   ├── init_duckdb_schema.sql
+│   └── load_duckdb.py
+├── app/
+│   ├── __init__.py
+│   ├── main.py
+│   ├── config.py
+│   ├── db.py
+│   ├── dependencies.py
+│   ├── schemas.py
+│   ├── exceptions.py
+│   ├── logging_config.py
+│   └── routers/
+│       ├── __init__.py
+│       ├── parts.py
+│       ├── shipping.py
+│       ├── makes.py
+│       └── models.py
+├── tests/
+│   ├── conftest.py
+│   └── test_parts_api.py
+└── README.md
+------------------------------------------------------------------------------
+
+Endpoints delivered (matches the "Parts Catalog API" / "Auto Parts REST API"
+spec exactly, plus pagination/sorting/filtering as required):
+
+  GET /parts            search/list — filter by make, model, condition,
+                        min_price, max_price, is_bargain_price; sort;
+                        paginated
+  GET /parts/{ref_no}   full detail for one part, including its shipping
+                        options — 404 if not found
+  GET /shipping         search shipping options across the catalog —
+                        filter by ref_no, destination_port, freight_method,
+                        max_price; paginated
+  GET /makes            distinct makes with part counts
+  GET /models            distinct models with part counts, optionally
+                        scoped to one make
+  GET /health           liveness check
+
+================================================================================
+FILE: README.md
+================================================================================
+# PartsFlow Backend — Junior: Auto Parts REST API
+
+A read-only, production-shaped REST API over a DuckDB warehouse of scraped
+BeForward auto parts listings.
+
+## Why DuckDB here
+
+DuckDB is embedded (one file, one process) — there's no separate database
+server to run. That has one real operational consequence this API is built
+around: **load data before starting the API, or restart the API after
+reloading data.** DuckDB doesn't support a writer and readers hitting the
+same file concurrently the way Postgres does. The API opens a single
+**read-only** connection at startup and hands out thread-safe cursors per
+request (`Connection.cursor()`), which is the correct concurrency pattern
+for many concurrent *reads* — it just means the loader and the API server
+shouldn't run against the same file at the same time.
+
+## Schema (as loaded by scripts/load_duckdb.py)
+
+```
+parts (ref_no PK)
+  ├─< shipping_options (part_ref_no FK)
+  ├─< similar_items    (part_ref_no FK)
+  └─< reviews          (part_ref_no FK)
+```
+
+`parts` flattens `price`, `specifications`, and the review summary directly
+onto the row; `images` is stored as a native DuckDB `VARCHAR[]` list rather
+than a child table, since it's just a list of URLs with no extra
+attributes per image.
+
+## Setup
+
+```bash
+cp .env.example .env
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+## Load data and run locally
+
+```bash
+python scripts/load_duckdb.py --db data/partsflow.duckdb --input data/sample_parts.json
+uvicorn app.main:app --reload
+```
+
+Then open http://localhost:8000/docs for interactive Swagger UI, or:
+
+```bash
+curl "http://localhost:8000/parts?make=SUZUKI&min_price=50&max_price=200"
+curl "http://localhost:8000/parts/PA112843670"
+curl "http://localhost:8000/shipping?ref_no=PA112843670"
+curl "http://localhost:8000/makes"
+curl "http://localhost:8000/models?make=SUZUKI"
+```
+
+## Run with Docker
+
+```bash
+docker compose up --build
+```
+
+The container's entrypoint auto-loads `data/sample_parts.json` on first run
+if no DuckDB file exists yet at `DUCKDB_PATH`. Mount your own already-loaded
+`.duckdb` file at that path instead to skip seeding.
+
+## Tests
+
+```bash
+pytest
+```
+
+Tests spin up a temporary DuckDB file per test session, load the sample
+record, and override the `db_cursor` FastAPI dependency to point at it —
+no real file paths or running server required.
+
+## Adding a new filter (example)
+
+Filters live in `app/routers/parts.py` in `_build_filters()`. Add a new
+optional query parameter to `list_parts()`, then append a `(clause, param)`
+pair the same way `make`/`model`/`condition` do. Everything is bound via
+`?` placeholders, never string-interpolated, so this stays SQL-injection-safe
+by construction.
+
+================================================================================
+FILE: .env.example
+================================================================================
+DUCKDB_PATH=data/partsflow.duckdb
+CORS_ORIGINS=*
+DEFAULT_PAGE_SIZE=20
+MAX_PAGE_SIZE=100
+
+================================================================================
+FILE: requirements.txt
+================================================================================
+fastapi>=0.110
+uvicorn[standard]>=0.29
+duckdb>=0.10
+pydantic>=2.6
+python-dotenv>=1.0
+pytest>=8.0
+httpx>=0.27
+
+================================================================================
+FILE: Dockerfile
+================================================================================
+FROM python:3.12-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+RUN chmod +x docker-entrypoint.sh
+
+ENV PYTHONUNBUFFERED=1
+ENV DUCKDB_PATH=/app/data/partsflow.duckdb
+
+EXPOSE 8000
+
+ENTRYPOINT ["./docker-entrypoint.sh"]
+
+================================================================================
+FILE: docker-entrypoint.sh
+================================================================================
+#!/bin/sh
+set -e
+
+if [ ! -f "$DUCKDB_PATH" ] && [ -f "data/sample_parts.json" ]; then
+    echo "No DuckDB file found at $DUCKDB_PATH — loading seed data..."
+    python scripts/load_duckdb.py --db "$DUCKDB_PATH" --input data/sample_parts.json
+fi
+
+exec uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+================================================================================
+FILE: docker-compose.yml
+================================================================================
+version: "3.9"
+
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      DUCKDB_PATH: /app/data/partsflow.duckdb
+      CORS_ORIGINS: "*"
+    volumes:
+      - ./data:/app/data
+
+================================================================================
+FILE: data/sample_parts.json
+================================================================================
+[
+  {
+    "url": "https://autoparts.beforward.jp/detail/Transmission---Drivetrain/Steering-Columns/PA112843670/",
+    "scraped_at": "2026-07-17T14:06:23Z",
+    "ref_no": "PA112843670",
+    "item_location": "JAPAN",
+    "price": {
+      "currency": "$",
+      "original_price": 164.0,
+      "current_price": 115.0,
+      "you_save_amount": 49.0,
+      "you_save_percent": 30,
+      "is_bargain_price": true
+    },
+    "people_viewing_now": 37,
+    "specifications": {
+      "Condition": "Used",
+      "Make": "SUZUKI",
+      "Model": "Solio",
+      "Product Name": "Steering Column SUZUKI Solio 2012 DBA-MA15S",
+      "Model Code": "DBA-MA15S",
+      "Reg. Year/month": "2012/8",
+      "Mileage": "46,992 km",
+      "Mission Type": "CVT",
+      "Engine Model": "K12B",
+      "Engine Size": "1,200 cc",
+      "Fuel": "Gasoline",
+      "Drive": "4×4",
+      "Auto Parts Maker": "-",
+      "Genuine Parts No.": "4820054M10"
+    },
+    "description": "I tilt it and am with air back, power steering and am with a computer and am with a motor",
+    "images": [
+      "https://image-cdn.beforward.jp/autoparts/original/202607/114494168/PA112843670_eccd70.jpg",
+      "https://image-cdn.beforward.jp/autoparts/original/202607/114494168/PA112843670_bb352c.jpg",
+      "https://image-cdn.beforward.jp/autoparts/original/202607/114494168/PA112843670_cc6ac3.jpg"
+    ],
+    "shipping": {
+      "destination_country": "Kenya",
+      "options": [
+        {
+          "destination_port": "Shipping to your address",
+          "freight_method": null,
+          "price": 451.0,
+          "currency": "$",
+          "etd": null,
+          "eta": null,
+          "estimated_delivery": "10 days"
+        },
+        {
+          "destination_port": "Shipping to your address",
+          "freight_method": null,
+          "price": 487.0,
+          "currency": "$",
+          "etd": null,
+          "eta": null,
+          "estimated_delivery": "10 days"
+        },
+        {
+          "destination_port": "Dar es Salaam",
+          "freight_method": "Sea Freight",
+          "price": 30.0,
+          "currency": "$",
+          "etd": "Middle of August, 2026",
+          "eta": "End of September, 2026",
+          "estimated_delivery": null
+        },
+        {
+          "destination_port": "Mombasa",
+          "freight_method": "Sea Freight",
+          "price": 630.0,
+          "currency": "$",
+          "etd": null,
+          "eta": null,
+          "estimated_delivery": "3 months"
+        }
+      ]
+    },
+    "similar_items": [
+      {
+        "ref_no": "PA105133070",
+        "url": "https://autoparts.beforward.jp/detail/Transmission---Drivetrain/Steering-Columns/PA105133070/",
+        "name": "Steering Column SUZUKI Solio 2012 DBA-MA15S 4820054M10",
+        "image": "https://image-cdn.beforward.jp/autoparts/large/202409/106726077/PA105133070_89afe6.jpg?w=300",
+        "condition": "Used",
+        "price": 75.0,
+        "original_price": 106.0,
+        "currency": "$",
+        "discount_label": "(29% OFF)",
+        "tag": "BARGAIN PRICE"
+      },
+      {
+        "ref_no": "PA92627969",
+        "url": "https://autoparts.beforward.jp/detail/Transmission---Drivetrain/Steering-Columns/PA92627969/",
+        "name": "Steering Column SUZUKI Solio 2012 DBA-MA15S 4820054M10",
+        "image": "https://image-cdn.beforward.jp/autoparts/large/202504/94127843/PA92627969_075dcc.jpg?w=300",
+        "condition": "Used",
+        "price": 145.0,
+        "original_price": 206.0,
+        "currency": "$",
+        "discount_label": "(30% OFF)",
+        "tag": "BARGAIN PRICE"
+      }
+    ],
+    "reviews": {
+      "total_reviews_text": null,
+      "total_reviews_count": null,
+      "average_rating": null,
+      "reviews_scraped": 0,
+      "reviews": []
+    }
+  }
+]
+
+================================================================================
+FILE: scripts/__init__.py
+================================================================================
+(empty file — makes `scripts` importable as a package)
+
+================================================================================
+FILE: scripts/init_duckdb_schema.sql
+================================================================================
+CREATE TABLE IF NOT EXISTS parts (
+    ref_no VARCHAR PRIMARY KEY,
+    url VARCHAR,
+    scraped_at TIMESTAMP,
+    item_location VARCHAR,
+    currency VARCHAR,
+    original_price DOUBLE,
+    current_price DOUBLE,
+    you_save_amount DOUBLE,
+    you_save_percent INTEGER,
+    is_bargain_price BOOLEAN,
+    people_viewing_now INTEGER,
+    condition VARCHAR,
+    make VARCHAR,
+    model VARCHAR,
+    product_name VARCHAR,
+    model_code VARCHAR,
+    reg_year_month VARCHAR,
+    mileage VARCHAR,
+    mission_type VARCHAR,
+    engine_model VARCHAR,
+    engine_size VARCHAR,
+    fuel VARCHAR,
+    drive VARCHAR,
+    auto_parts_maker VARCHAR,
+    genuine_parts_no VARCHAR,
+    description VARCHAR,
+    images VARCHAR[],
+    total_reviews_text VARCHAR,
+    total_reviews_count INTEGER,
+    average_rating INTEGER,
+    reviews_scraped INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS shipping_options (
+    id BIGINT PRIMARY KEY,
+    part_ref_no VARCHAR REFERENCES parts(ref_no),
+    destination_country VARCHAR,
+    destination_port VARCHAR,
+    freight_method VARCHAR,
+    price DOUBLE,
+    currency VARCHAR,
+    etd VARCHAR,
+    eta VARCHAR,
+    estimated_delivery VARCHAR
+);
+
+CREATE TABLE IF NOT EXISTS similar_items (
+    id BIGINT PRIMARY KEY,
+    part_ref_no VARCHAR REFERENCES parts(ref_no),
+    similar_ref_no VARCHAR,
+    url VARCHAR,
+    name VARCHAR,
+    image VARCHAR,
+    condition VARCHAR,
+    price DOUBLE,
+    original_price DOUBLE,
+    currency VARCHAR,
+    discount_label VARCHAR,
+    tag VARCHAR
+);
+
+CREATE TABLE IF NOT EXISTS reviews (
+    id BIGINT PRIMARY KEY,
+    part_ref_no VARCHAR REFERENCES parts(ref_no),
+    review_id VARCHAR,
+    title VARCHAR,
+    reviewer_name VARCHAR,
+    reviewer_country VARCHAR,
+    review_date VARCHAR,
+    verified_buyer BOOLEAN,
+    rating INTEGER,
+    text VARCHAR,
+    likes INTEGER
+);
+
+CREATE SEQUENCE IF NOT EXISTS shipping_options_id_seq START 1;
+CREATE SEQUENCE IF NOT EXISTS similar_items_id_seq START 1;
+CREATE SEQUENCE IF NOT EXISTS reviews_id_seq START 1;
+
+CREATE INDEX IF NOT EXISTS idx_parts_make_model ON parts(make, model);
+CREATE INDEX IF NOT EXISTS idx_shipping_part ON shipping_options(part_ref_no);
+CREATE INDEX IF NOT EXISTS idx_similar_part ON similar_items(part_ref_no);
+CREATE INDEX IF NOT EXISTS idx_reviews_part ON reviews(part_ref_no);
+
+================================================================================
+FILE: scripts/load_duckdb.py
+================================================================================
+#!/usr/bin/env python3
+"""Load scraped part JSON records into the DuckDB warehouse.
+
+Usage:
+    python scripts/load_duckdb.py --db data/partsflow.duckdb --input data/sample_parts.json
+"""
+from __future__ import annotations
+import argparse
+import json
+from pathlib import Path
+
+import duckdb
+
+SCHEMA_SQL_PATH = Path(__file__).parent / "init_duckdb_schema.sql"
+PLACEHOLDER_VALUES = {"-", "", "N/A", "n/a"}
+
+
+def _clean(value):
+    if isinstance(value, str) and value.strip() in PLACEHOLDER_VALUES:
+        return None
+    return value
+
+
+def load_records(con: "duckdb.DuckDBPyConnection", records: list[dict]) -> int:
+    loaded = 0
+    for record in records:
+        if "error" in record or "price" not in record:
+            continue
+        ref_no = record.get("ref_no")
+        if not ref_no:
+            continue
+
+        price = record.get("price", {}) or {}
+        specs = {k: _clean(v) for k, v in (record.get("specifications") or {}).items()}
+        shipping = record.get("shipping", {}) or {}
+        reviews_summary = record.get("reviews", {}) or {}
+
+        con.execute(
+            """
+            INSERT OR REPLACE INTO parts VALUES (
+                $ref_no, $url, $scraped_at, $item_location,
+                $currency, $original_price, $current_price, $you_save_amount,
+                $you_save_percent, $is_bargain_price, $people_viewing_now,
+                $condition, $make, $model, $product_name, $model_code,
+                $reg_year_month, $mileage, $mission_type, $engine_model,
+                $engine_size, $fuel, $drive, $auto_parts_maker, $genuine_parts_no,
+                $description, $images,
+                $total_reviews_text, $total_reviews_count, $average_rating, $reviews_scraped
+            )
+            """,
+            {
+                "ref_no": ref_no,
+                "url": record.get("url"),
+                "scraped_at": record.get("scraped_at"),
+                "item_location": record.get("item_location"),
+                "currency": price.get("currency"),
+                "original_price": price.get("original_price"),
+                "current_price": price.get("current_price"),
+                "you_save_amount": price.get("you_save_amount"),
+                "you_save_percent": price.get("you_save_percent"),
+                "is_bargain_price": price.get("is_bargain_price", False),
+                "people_viewing_now": record.get("people_viewing_now"),
+                "condition": specs.get("Condition"),
+                "make": specs.get("Make"),
+                "model": specs.get("Model"),
+                "product_name": specs.get("Product Name"),
+                "model_code": specs.get("Model Code"),
+                "reg_year_month": specs.get("Reg. Year/month"),
+                "mileage": specs.get("Mileage"),
+                "mission_type": specs.get("Mission Type"),
+                "engine_model": specs.get("Engine Model"),
+                "engine_size": specs.get("Engine Size"),
+                "fuel": specs.get("Fuel"),
+                "drive": specs.get("Drive"),
+                "auto_parts_maker": specs.get("Auto Parts Maker"),
+                "genuine_parts_no": specs.get("Genuine Parts No."),
+                "description": record.get("description"),
+                "images": record.get("images", []),
+                "total_reviews_text": reviews_summary.get("total_reviews_text"),
+                "total_reviews_count": reviews_summary.get("total_reviews_count"),
+                "average_rating": reviews_summary.get("average_rating"),
+                "reviews_scraped": reviews_summary.get("reviews_scraped"),
+            },
+        )
+
+        con.execute("DELETE FROM shipping_options WHERE part_ref_no = ?", [ref_no])
+        for opt in shipping.get("options", []) or []:
+            con.execute(
+                """
+                INSERT INTO shipping_options VALUES (
+                    nextval('shipping_options_id_seq'), $part_ref_no,
+                    $destination_country, $destination_port, $freight_method,
+                    $price, $currency, $etd, $eta, $estimated_delivery
+                )
+                """,
+                {
+                    "part_ref_no": ref_no,
+                    "destination_country": shipping.get("destination_country"),
+                    "destination_port": opt.get("destination_port"),
+                    "freight_method": opt.get("freight_method"),
+                    "price": opt.get("price"),
+                    "currency": opt.get("currency"),
+                    "etd": opt.get("etd"),
+                    "eta": opt.get("eta"),
+                    "estimated_delivery": opt.get("estimated_delivery"),
+                },
+            )
+
+        con.execute("DELETE FROM similar_items WHERE part_ref_no = ?", [ref_no])
+        for item in record.get("similar_items", []) or []:
+            con.execute(
+                """
+                INSERT INTO similar_items VALUES (
+                    nextval('similar_items_id_seq'), $part_ref_no,
+                    $similar_ref_no, $url, $name, $image, $condition,
+                    $price, $original_price, $currency, $discount_label, $tag
+                )
+                """,
+                {
+                    "part_ref_no": ref_no,
+                    "similar_ref_no": item.get("ref_no"),
+                    "url": item.get("url"),
+                    "name": item.get("name"),
+                    "image": item.get("image"),
+                    "condition": item.get("condition"),
+                    "price": item.get("price"),
+                    "original_price": item.get("original_price"),
+                    "currency": item.get("currency"),
+                    "discount_label": item.get("discount_label"),
+                    "tag": item.get("tag"),
+                },
+            )
+
+        con.execute("DELETE FROM reviews WHERE part_ref_no = ?", [ref_no])
+        for rev in reviews_summary.get("reviews", []) or []:
+            con.execute(
+                """
+                INSERT INTO reviews VALUES (
+                    nextval('reviews_id_seq'), $part_ref_no, $review_id, $title,
+                    $reviewer_name, $reviewer_country, $review_date,
+                    $verified_buyer, $rating, $text, $likes
+                )
+                """,
+                {
+                    "part_ref_no": ref_no,
+                    "review_id": rev.get("review_id"),
+                    "title": rev.get("title"),
+                    "reviewer_name": rev.get("reviewer_name"),
+                    "reviewer_country": rev.get("reviewer_country"),
+                    "review_date": rev.get("date"),
+                    "verified_buyer": rev.get("verified_buyer", False),
+                    "rating": rev.get("rating"),
+                    "text": rev.get("text"),
+                    "likes": rev.get("likes"),
+                },
+            )
+
+        loaded += 1
+    return loaded
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--db", default="data/partsflow.duckdb")
+    parser.add_argument("--input", required=True)
+    args = parser.parse_args()
+
+    Path(args.db).parent.mkdir(parents=True, exist_ok=True)
+    con = duckdb.connect(args.db)
+    con.execute(SCHEMA_SQL_PATH.read_text())
+
+    records = json.loads(Path(args.input).read_text(encoding="utf-8"))
+    if isinstance(records, dict):
+        records = [records]
+
+    count = load_records(con, records)
+    con.close()
+    print(f"Loaded {count} part(s) into {args.db}")
+
+
+if __name__ == "__main__":
+    main()
+
+================================================================================
+FILE: app/__init__.py
+================================================================================
+(empty file — makes `app` importable as a package)
+
+================================================================================
+FILE: app/config.py
+================================================================================
+import os
+from dataclasses import dataclass, field
+
+
+@dataclass
+class Settings:
+    duckdb_path: str = os.environ.get("DUCKDB_PATH", "data/partsflow.duckdb")
+    api_title: str = "Auto Parts REST API"
+    api_version: str = "1.0.0"
+    default_page_size: int = int(os.environ.get("DEFAULT_PAGE_SIZE", "20"))
+    max_page_size: int = int(os.environ.get("MAX_PAGE_SIZE", "100"))
+    cors_origins: list[str] = field(default_factory=lambda: [
+        o.strip() for o in os.environ.get("CORS_ORIGINS", "*").split(",")
+    ])
+
+
+settings = Settings()
+
+================================================================================
+FILE: app/logging_config.py
+================================================================================
+import logging
+
+
+def setup_logging() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+
+================================================================================
+FILE: app/db.py
+================================================================================
+"""DuckDB connection management.
+
+DuckDB's Python client is not safe to share a single Connection object
+across threads, but `Connection.cursor()` creates a lightweight,
+thread-safe cursor from an already-open database. FastAPI runs sync route
+handlers in a thread pool, so each request gets its own cursor from the one
+shared, read-only connection opened at startup — this is the correct
+concurrency pattern for a read-heavy DuckDB-backed API.
+"""
+from __future__ import annotations
+import logging
+from pathlib import Path
+
+import duckdb
+
+from .config import settings
+
+logger = logging.getLogger("db")
+
+_connection: duckdb.DuckDBPyConnection | None = None
+
+
+def connect() -> None:
+    global _connection
+    if not Path(settings.duckdb_path).exists():
+        logger.warning(
+            "DuckDB file not found at %s — the API will return 503 until "
+            "it's loaded (see scripts/load_duckdb.py).", settings.duckdb_path,
+        )
+        _connection = None
+        return
+    _connection = duckdb.connect(settings.duckdb_path, read_only=True)
+    logger.info("Connected to DuckDB at %s (read-only)", settings.duckdb_path)
+
+
+def disconnect() -> None:
+    global _connection
+    if _connection is not None:
+        _connection.close()
+        _connection = None
+
+
+def get_cursor() -> duckdb.DuckDBPyConnection:
+    if _connection is None:
+        raise RuntimeError("DuckDB is not connected.")
+    return _connection.cursor()
+
+================================================================================
+FILE: app/dependencies.py
+================================================================================
+from typing import Generator
+
+import duckdb
+from fastapi import HTTPException, status
+
+from .db import get_cursor
+
+
+def db_cursor() -> Generator[duckdb.DuckDBPyConnection, None, None]:
+    try:
+        cur = get_cursor()
+    except RuntimeError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The data warehouse is not available yet.",
+        )
+    try:
+        yield cur
+    finally:
+        cur.close()
+
+================================================================================
+FILE: app/exceptions.py
+================================================================================
+from fastapi import HTTPException, status
+
+
+class PartNotFoundError(HTTPException):
+    def __init__(self, ref_no: str):
+        super().__init__(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Part with ref_no '{ref_no}' was not found.",
+        )
+
+================================================================================
+FILE: app/schemas.py
+================================================================================
+from __future__ import annotations
+from datetime import datetime
+from typing import Generic, List, Optional, TypeVar
+
+from pydantic import BaseModel, Field
+
+T = TypeVar("T")
+
+
+class Page(BaseModel, Generic[T]):
+    items: List[T]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+
+
+class ShippingOptionOut(BaseModel):
+    destination_country: Optional[str] = None
+    destination_port: Optional[str] = None
+    freight_method: Optional[str] = None
+    price: Optional[float] = None
+    currency: Optional[str] = None
+    etd: Optional[str] = None
+    eta: Optional[str] = None
+    estimated_delivery: Optional[str] = None
+
+
+class SimilarItemOut(BaseModel):
+    similar_ref_no: Optional[str] = None
+    url: Optional[str] = None
+    name: Optional[str] = None
+    image: Optional[str] = None
+    condition: Optional[str] = None
+    price: Optional[float] = None
+    original_price: Optional[float] = None
+    currency: Optional[str] = None
+    discount_label: Optional[str] = None
+    tag: Optional[str] = None
+
+
+class PartSummary(BaseModel):
+    ref_no: str
+    url: str
+    make: Optional[str] = None
+    model: Optional[str] = None
+    product_name: Optional[str] = None
+    condition: Optional[str] = None
+    currency: Optional[str] = None
+    current_price: Optional[float] = None
+    original_price: Optional[float] = None
+    you_save_percent: Optional[int] = None
+    is_bargain_price: bool = False
+    thumbnail: Optional[str] = None
+
+
+class PartDetail(PartSummary):
+    scraped_at: Optional[datetime] = None
+    item_location: Optional[str] = None
+    people_viewing_now: Optional[int] = None
+    model_code: Optional[str] = None
+    reg_year_month: Optional[str] = None
+    mileage: Optional[str] = None
+    mission_type: Optional[str] = None
+    engine_model: Optional[str] = None
+    engine_size: Optional[str] = None
+    fuel: Optional[str] = None
+    drive: Optional[str] = None
+    auto_parts_maker: Optional[str] = None
+    genuine_parts_no: Optional[str] = None
+    description: Optional[str] = None
+    images: List[str] = Field(default_factory=list)
+    you_save_amount: Optional[float] = None
+    total_reviews_text: Optional[str] = None
+    total_reviews_count: Optional[int] = None
+    average_rating: Optional[int] = None
+    reviews_scraped: Optional[int] = None
+    shipping_options: List[ShippingOptionOut] = Field(default_factory=list)
+
+    model_config = {"extra": "ignore"}
+
+
+class MakeCount(BaseModel):
+    make: str
+    part_count: int
+
+
+class ModelCount(BaseModel):
+    make: Optional[str] = None
+    model: str
+    part_count: int
+
+================================================================================
+FILE: app/routers/__init__.py
+================================================================================
+(empty file — makes `routers` importable as a package)
+
+================================================================================
+FILE: app/routers/parts.py
+================================================================================
+from __future__ import annotations
+from typing import Literal, Optional
+
+import duckdb
+from fastapi import APIRouter, Depends, Query
+
+from ..dependencies import db_cursor
+from ..exceptions import PartNotFoundError
+from ..schemas import Page, PartDetail, PartSummary, ShippingOptionOut
+
+router = APIRouter(prefix="/parts", tags=["parts"])
+
+SortField = Literal["current_price", "original_price", "you_save_percent", "scraped_at"]
+
+SORT_COLUMNS: dict[str, str] = {
+    "current_price": "current_price",
+    "original_price": "original_price",
+    "you_save_percent": "you_save_percent",
+    "scraped_at": "scraped_at",
+}
+
+
+def _build_filters(
+    make: Optional[str],
+    model: Optional[str],
+    condition: Optional[str],
+    min_price: Optional[float],
+    max_price: Optional[float],
+    is_bargain_price: Optional[bool],
+) -> tuple[str, list]:
+    clauses: list[str] = []
+    params: list = []
+    if make:
+        clauses.append("LOWER(make) = LOWER(?)")
+        params.append(make)
+    if model:
+        clauses.append("LOWER(model) = LOWER(?)")
+        params.append(model)
+    if condition:
+        clauses.append("LOWER(condition) = LOWER(?)")
+        params.append(condition)
+    if min_price is not None:
+        clauses.append("current_price >= ?")
+        params.append(min_price)
+    if max_price is not None:
+        clauses.append("current_price <= ?")
+        params.append(max_price)
+    if is_bargain_price is not None:
+        clauses.append("is_bargain_price = ?")
+        params.append(is_bargain_price)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    return where, params
+
+
+@router.get("", response_model=Page[PartSummary])
+def list_parts(
+    make: Optional[str] = Query(None, description="Filter by exact make, case-insensitive"),
+    model: Optional[str] = Query(None, description="Filter by exact model, case-insensitive"),
+    condition: Optional[str] = Query(None, description="e.g. Used, New"),
+    min_price: Optional[float] = Query(None, ge=0),
+    max_price: Optional[float] = Query(None, ge=0),
+    is_bargain_price: Optional[bool] = Query(None),
+    sort_by: SortField = Query("scraped_at"),
+    sort_dir: Literal["asc", "desc"] = Query("desc"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    cur: duckdb.DuckDBPyConnection = Depends(db_cursor),
+):
+    """Search/list parts with filtering, sorting, and pagination."""
+    sort_col = SORT_COLUMNS[sort_by]
+    where, params = _build_filters(make, model, condition, min_price, max_price, is_bargain_price)
+
+    total = cur.execute(f"SELECT COUNT(*) FROM parts {where}", params).fetchone()[0]
+
+    offset = (page - 1) * page_size
+    rows = cur.execute(
+        f"""
+        SELECT ref_no, url, make, model, product_name, condition, currency,
+               current_price, original_price, you_save_percent,
+               is_bargain_price, images
+        FROM parts
+        {where}
+        ORDER BY {sort_col} {sort_dir.upper()} NULLS LAST
+        LIMIT ? OFFSET ?
+        """,
+        [*params, page_size, offset],
+    ).fetchall()
+    columns = [d[0] for d in cur.description]
+
+    items = []
+    for row in rows:
+        record = dict(zip(columns, row))
+        images = record.pop("images") or []
+        record["thumbnail"] = images[0] if images else None
+        items.append(PartSummary(**record))
+
+    total_pages = (total + page_size - 1) // page_size if page_size else 0
+    return Page(items=items, total=total, page=page, page_size=page_size, total_pages=total_pages)
+
+
+@router.get("/{ref_no}", response_model=PartDetail)
+def get_part(ref_no: str, cur: duckdb.DuckDBPyConnection = Depends(db_cursor)):
+    """Get one part's full detail, including its shipping options."""
+    row = cur.execute("SELECT * FROM parts WHERE ref_no = ?", [ref_no]).fetchone()
+    if row is None:
+        raise PartNotFoundError(ref_no)
+    columns = [d[0] for d in cur.description]
+    record = dict(zip(columns, row))
+    record["thumbnail"] = record["images"][0] if record.get("images") else None
+
+    shipping_rows = cur.execute(
+        """
+        SELECT destination_country, destination_port, freight_method,
+               price, currency, etd, eta, estimated_delivery
+        FROM shipping_options WHERE part_ref_no = ?
+        """,
+        [ref_no],
+    ).fetchall()
+    shipping_columns = [d[0] for d in cur.description]
+    record["shipping_options"] = [
+        ShippingOptionOut(**dict(zip(shipping_columns, r))) for r in shipping_rows
+    ]
+
+    return PartDetail(**record)
+
+================================================================================
+FILE: app/routers/shipping.py
+================================================================================
+from __future__ import annotations
+from typing import Optional
+
+import duckdb
+from fastapi import APIRouter, Depends, Query
+
+from ..dependencies import db_cursor
+from ..schemas import Page, ShippingOptionOut
+
+router = APIRouter(prefix="/shipping", tags=["shipping"])
+
+
+@router.get("", response_model=Page[ShippingOptionOut])
+def list_shipping_options(
+    ref_no: Optional[str] = Query(None, description="Filter to one part's shipping options"),
+    destination_port: Optional[str] = Query(None),
+    freight_method: Optional[str] = Query(None),
+    max_price: Optional[float] = Query(None, ge=0),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    cur: duckdb.DuckDBPyConnection = Depends(db_cursor),
+):
+    """List/search shipping options across the catalog — e.g. 'which parts
+    ship via Sea Freight to Mombasa for under $500'."""
+    clauses: list[str] = []
+    params: list = []
+    if ref_no:
+        clauses.append("part_ref_no = ?")
+        params.append(ref_no)
+    if destination_port:
+        clauses.append("LOWER(destination_port) = LOWER(?)")
+        params.append(destination_port)
+    if freight_method:
+        clauses.append("LOWER(freight_method) = LOWER(?)")
+        params.append(freight_method)
+    if max_price is not None:
+        clauses.append("price <= ?")
+        params.append(max_price)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+
+    total = cur.execute(f"SELECT COUNT(*) FROM shipping_options {where}", params).fetchone()[0]
+
+    offset = (page - 1) * page_size
+    rows = cur.execute(
+        f"""
+        SELECT destination_country, destination_port, freight_method,
+               price, currency, etd, eta, estimated_delivery
+        FROM shipping_options
+        {where}
+        ORDER BY price ASC NULLS LAST
+        LIMIT ? OFFSET ?
+        """,
+        [*params, page_size, offset],
+    ).fetchall()
+    columns = [d[0] for d in cur.description]
+    items = [ShippingOptionOut(**dict(zip(columns, r))) for r in rows]
+
+    total_pages = (total + page_size - 1) // page_size if page_size else 0
+    return Page(items=items, total=total, page=page, page_size=page_size, total_pages=total_pages)
+
+================================================================================
+FILE: app/routers/makes.py
+================================================================================
+import duckdb
+from fastapi import APIRouter, Depends
+
+from ..dependencies import db_cursor
+from ..schemas import MakeCount
+
+router = APIRouter(prefix="/makes", tags=["makes"])
+
+
+@router.get("", response_model=list[MakeCount])
+def list_makes(cur: duckdb.DuckDBPyConnection = Depends(db_cursor)):
+    """Distinct makes present in the catalog, with a part count each."""
+    rows = cur.execute(
+        """
+        SELECT make, COUNT(*) AS part_count
+        FROM parts
+        WHERE make IS NOT NULL
+        GROUP BY make
+        ORDER BY part_count DESC, make ASC
+        """
+    ).fetchall()
+    return [MakeCount(make=r[0], part_count=r[1]) for r in rows]
+
+================================================================================
+FILE: app/routers/models.py
+================================================================================
+from typing import Optional
+
+import duckdb
+from fastapi import APIRouter, Depends, Query
+
+from ..dependencies import db_cursor
+from ..schemas import ModelCount
+
+router = APIRouter(prefix="/models", tags=["models"])
+
+
+@router.get("", response_model=list[ModelCount])
+def list_models(
+    make: Optional[str] = Query(None, description="Restrict to one make"),
+    cur=Depends(db_cursor),
+):
+    """Distinct models present in the catalog, optionally scoped to one make."""
+    where = "WHERE model IS NOT NULL"
+    params: list = []
+    if make:
+        where += " AND LOWER(make) = LOWER(?)"
+        params.append(make)
+
+    rows = cur.execute(
+        f"""
+        SELECT make, model, COUNT(*) AS part_count
+        FROM parts
+        {where}
+        GROUP BY make, model
+        ORDER BY part_count DESC, model ASC
+        """,
+        params,
+    ).fetchall()
+    return [ModelCount(make=r[0], model=r[1], part_count=r[2]) for r in rows]
+
+================================================================================
+FILE: app/main.py
+================================================================================
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+from .config import settings
+from .db import connect, disconnect
+from .logging_config import setup_logging
+from .routers import makes, models, parts, shipping
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    setup_logging()
+    connect()
+    yield
+    disconnect()
+
+
+app = FastAPI(
+    title=settings.api_title,
+    version=settings.api_version,
+    description="Read-only REST API over a DuckDB warehouse of scraped "
+                 "BeForward auto parts listings.",
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,
+    allow_methods=["GET"],
+    allow_headers=["*"],
+)
+
+app.include_router(parts.router)
+app.include_router(shipping.router)
+app.include_router(makes.router)
+app.include_router(models.router)
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    return JSONResponse(status_code=500, content={"detail": "Internal server error."})
+
+
+@app.get("/health", tags=["health"])
+def health():
+    return {"status": "ok"}
+
+================================================================================
+FILE: tests/conftest.py
+================================================================================
+import json
+import sys
+from pathlib import Path
+
+import duckdb
+import pytest
+from fastapi.testclient import TestClient
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from app.main import app                       # noqa: E402
+from app.dependencies import db_cursor         # noqa: E402
+from scripts.load_duckdb import load_records   # noqa: E402
+
+SCHEMA_SQL = (Path(__file__).resolve().parents[1] / "scripts" / "init_duckdb_schema.sql").read_text()
+SAMPLE_JSON = Path(__file__).resolve().parents[1] / "data" / "sample_parts.json"
+
+
+@pytest.fixture()
+def test_connection(tmp_path):
+    db_path = tmp_path / "test.duckdb"
+    con = duckdb.connect(str(db_path))
+    con.execute(SCHEMA_SQL)
+    records = json.loads(SAMPLE_JSON.read_text())
+    if isinstance(records, dict):
+        records = [records]
+    load_records(con, records)
+    yield con
+    con.close()
+
+
+@pytest.fixture()
+def client(test_connection):
+    def _override_db_cursor():
+        cur = test_connection.cursor()
+        try:
+            yield cur
+        finally:
+            cur.close()
+
+    app.dependency_overrides[db_cursor] = _override_db_cursor
+    with TestClient(app) as c:
+        yield c
+    app.dependency_overrides.clear()
+
+================================================================================
+FILE: tests/test_parts_api.py
+================================================================================
+def test_health(client):
+    resp = client.get("/health")
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ok"}
+
+
+def test_list_parts_returns_seeded_part(client):
+    resp = client.get("/parts")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] >= 1
+    assert any(item["ref_no"] == "PA112843670" for item in body["items"])
+
+
+def test_get_part_detail(client):
+    resp = client.get("/parts/PA112843670")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["make"] == "SUZUKI"
+    assert body["model"] == "Solio"
+    assert body["auto_parts_maker"] is None          # "-" placeholder normalized
+    assert len(body["shipping_options"]) == 4
+
+
+def test_get_part_not_found(client):
+    resp = client.get("/parts/DOES-NOT-EXIST")
+    assert resp.status_code == 404
+
+
+def test_filter_parts_by_make_is_case_insensitive(client):
+    resp = client.get("/parts", params={"make": "suzuki"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] >= 1
+    assert all(item["make"] == "SUZUKI" for item in body["items"])
+
+
+def test_price_range_filter_excludes_out_of_range(client):
+    resp = client.get("/parts", params={"min_price": 1000})
+    assert resp.status_code == 200
+    assert resp.json()["total"] == 0
+
+
+def test_list_shipping_options_for_one_part(client):
+    resp = client.get("/shipping", params={"ref_no": "PA112843670"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 4
+    assert body["items"][0]["price"] <= body["items"][-1]["price"]  # sorted ascending
+
+
+def test_list_makes(client):
+    resp = client.get("/makes")
+    assert resp.status_code == 200
+    makes = {m["make"] for m in resp.json()}
+    assert "SUZUKI" in makes
+
+
+def test_list_models_filtered_by_make(client):
+    resp = client.get("/models", params={"make": "SUZUKI"})
+    assert resp.status_code == 200
+    models = {m["model"] for m in resp.json()}
+    assert "Solio" in models
+
+
+AUTO PARTS MARKET INTELLIGENCE PLATFORM
+Project Roadmap, Checklist & Deliverables
+
+A single end-to-end platform combining Data Engineering, Data Analysis, Data
+Science, and Backend Engineering on top of scraped auto-parts marketplace
+data (BeForward-style JSON: pricing, specifications, shipping options,
+similar_items, reviews). Suggested pace: ~14 weeks part-time - adjust freely.
+
+================================================================================
+PHASE 0 - FOUNDATIONS  (Week 1)
+================================================================================
+Goal: a clean base every later phase builds on.
+
+Checklist:
+[ ] Set up repo structure: ingestion/, warehouse/, ml/, api/, bi/, infra/
+[ ] Docker Compose for local dev (Postgres, Redis, Kafka - optional at this
+    stage, Airflow)
+[ ] Define a unified "Part" entity/schema so multiple marketplaces (e.g.
+    BeForward, SBT, Cars From Japan) can map into the same model
+[ ] Set up CI skeleton (GitHub Actions): lint + test on every push
+[ ] Draft README with a first-pass architecture diagram
+
+Deliverables:
+  - GitHub repo with the folder structure above, committed and pushed
+  - docker-compose.yml that brings up Postgres + Redis locally
+  - ARCHITECTURE.md (draft) with a high-level diagram
+  - CONTRIBUTING.md / local dev setup doc
+
+================================================================================
+PHASE 1 - DATA ENGINEERING: INGESTION & MEDALLION PIPELINE  (Weeks 2-4)
+================================================================================
+Goal: reliable, governed ingestion from raw scrape to analytics-ready tables.
+
+Checklist:
+[ ] Harden the scraper(s): retry/backoff, checkpoint-based resumption, rate
+    limiting, structured logging
+[ ] Land raw JSON to Bronze as-is (object storage or raw Postgres table),
+    keyed on Ref No. + scraped_at for full history
+[ ] (Stretch) Define Kafka topics for listing events: new / price-changed /
+    removed
+[ ] Build Silver transforms: parse pricing, specifications, shipping.options,
+    similar_items, reviews into normalized relational tables; normalize "-"
+    placeholders and nulls
+[ ] Add data quality checks (dbt tests or Great Expectations): price >= 0,
+    current_price <= original_price, valid currency codes, required fields
+    present
+[ ] Build Gold marts: price-per-make-model, shipping cost/time summary by
+    destination_port and freight_method
+[ ] Orchestrate with an Airflow DAG: scrape -> bronze -> silver -> gold,
+    scheduled and safely re-runnable (idempotent)
+[ ] Unit tests for parsing/transform logic
+
+Deliverables:
+  - Scraper(s) with checkpoint/resume, writing to Bronze
+  - dbt project (staging + marts models, tests, dbt docs generated)
+  - Airflow DAG(s), plus a screenshot/export of a successful run
+  - Data dictionary: field-level documentation for Bronze/Silver/Gold
+  - Data quality report showing checks run and pass/fail results
+
+================================================================================
+PHASE 2 - DATA ANALYSIS: BI & REPORTING LAYER  (Weeks 4-5, overlaps Phase 1)
+================================================================================
+Goal: turn Gold marts into dashboards a stakeholder could actually use.
+
+Checklist:
+[ ] Connect a BI tool (Metabase / Power BI / Looker Studio) to the warehouse
+[ ] Dashboard: price & discount trends by make/model over time
+[ ] Dashboard: landed-cost comparison (current_price + shipping) across
+    destination_port / freight_method options
+[ ] Dashboard: demand proxy (people_viewing_now) vs bargain flag vs price
+[ ] Anomaly/outlier view - e.g. listings flagged "bargain" that aren't
+    actually below the market median for that make/model
+[ ] Write a 1-page insights memo: 3-5 concrete findings and what they'd
+    change about buying/sourcing decisions
+
+Deliverables:
+  - Exported/shareable BI dashboard (screenshots or link)
+  - Version-controlled SQL queries backing each chart
+  - INSIGHTS.md with findings and recommendations
+
+================================================================================
+PHASE 3 - DATA SCIENCE: MODELING & ML SERVICES  (Weeks 5-8)
+================================================================================
+Goal: price prediction, bargain detection, and recommendations as reusable
+services, not one-off notebooks.
+
+Checklist:
+[ ] Feature engineering from Gold tables (make/model/condition/mileage/
+    engine-size buckets)
+[ ] Baseline price-prediction model (linear regression) + improved model
+    (XGBoost/RandomForest); evaluate with MAE/RMSE
+[ ] Bargain-detection classifier; evaluate with precision/recall/confusion
+    matrix
+[ ] NLP parser for the free-text description field into structured
+    attributes (material, color, size, hole count, PCD, offset)
+[ ] Embedding-based similarity model (sentence-transformers) for
+    recommendations; benchmark against the site's own similar_items list
+[ ] Track experiments in MLflow: parameters, metrics, artifacts
+[ ] Package the best models for serving (pickle/ONNX) behind a FastAPI
+    endpoint
+[ ] Basic drift-monitoring check (e.g. Evidently AI report) comparing
+    training data to recent scrapes
+
+Deliverables:
+  - Training notebooks/scripts + MLflow experiment logs
+  - A model card per model: features used, metrics, known limitations
+  - /predict and /recommend service endpoints (ready for Phase 4 to consume)
+  - Sample drift/monitoring report
+
+================================================================================
+PHASE 4 - BACKEND: API & PRODUCT LAYER  (Weeks 8-10)
+================================================================================
+Goal: expose the platform as something a user could actually operate.
+
+Checklist:
+[ ] REST API: search/list parts (filter by make, model, condition, price
+    range), get detail by Ref No.
+[ ] Integrate the price-prediction and recommendation endpoints from Phase 3
+[ ] User accounts + authentication (JWT/OAuth2)
+[ ] Saved searches + price-drop alerts (Celery background job comparing new
+    scrapes to saved thresholds; email/webhook notification)
+[ ] Redis caching for hot queries; rate limiting on public endpoints
+[ ] OpenAPI/Swagger docs
+[ ] Automated tests (unit + integration) for endpoints
+
+Deliverables:
+  - Running API (via Docker Compose) with published OpenAPI spec
+  - Postman/Insomnia collection or example curl scripts
+  - Test suite with a coverage report
+  - Short demo video/GIF of the key flow: search -> detail -> save -> alert
+
+================================================================================
+PHASE 5 - INTEGRATION, ORCHESTRATION & DEPLOYMENT  (Weeks 10-12)
+================================================================================
+Goal: the whole system runs as one deployable unit, not five disconnected
+projects.
+
+Checklist:
+[ ] Containerize every service (ingestion, ML serving, API, BI connector)
+[ ] docker-compose to run the full stack locally (Kubernetes/Helm as a
+    stretch goal)
+[ ] CI/CD pipeline (GitHub Actions): lint, test, build, deploy on merge
+[ ] Deploy to a cloud free tier (AWS/GCP): warehouse, API, and
+    Airflow/orchestration reachable
+[ ] Infra as code (Terraform) for the core cloud resources
+[ ] Secrets management - no credentials committed; use .env + a secrets
+    manager
+
+Deliverables:
+  - docker-compose.yml (or k8s manifests) running the full platform
+  - CI/CD config with a green build badge in the README
+  - Terraform scripts for cloud resources
+  - A deployed, reachable environment (or a well-documented local fallback)
+
+================================================================================
+PHASE 6 - OBSERVABILITY, TESTING & DOCUMENTATION  (Weeks 12-13)
+================================================================================
+Goal: prove this is production-minded, not just a collection of scripts.
+
+Checklist:
+[ ] Structured logging across all services
+[ ] Health dashboards: pipeline (Airflow SLA misses, DQ pass rate) and API
+    (latency, error rate) via Prometheus/Grafana or equivalent
+[ ] End-to-end test: run the full pipeline from scrape to API response on a
+    clean environment
+[ ] Finalize the architecture diagram (system + data flow)
+[ ] Finalize README with setup instructions and screenshots
+[ ] Lightweight decisions log (why Kafka or not, why this DB, trade-offs made)
+
+Deliverables:
+  - ARCHITECTURE.md (final, with diagram)
+  - Monitoring dashboard screenshot(s)
+  - Full README with quickstart instructions
+  - DECISIONS.md (lightweight ADRs)
+
+================================================================================
+PHASE 7 - PORTFOLIO PACKAGING & PRESENTATION  (Weeks 13-14)
+================================================================================
+Goal: package the work so it lands in interviews and is publicly visible.
+
+Checklist:
+[ ] Write a case-study writeup: problem, architecture, trade-offs, results
+[ ] Record a 3-5 minute walkthrough/demo video
+[ ] Publish the repo(s) with a clear README, license, and any live/demo links
+[ ] Prepare a one-slide architecture summary for interviews
+[ ] Add the project to resume/LinkedIn/portfolio with concrete metrics (e.g.
+    "processed N listings," "cut landed-cost discovery time by X")
+
+Deliverables:
+  - Public, pinned GitHub repo(s)
+  - Case-study writeup (Markdown or hosted post)
+  - Demo video link
+  - One-pager summary (PDF or slide) for interview conversations
+
+================================================================================
+FINAL DELIVERABLES CHECKLIST (FULL PLATFORM)
+================================================================================
+[ ] Multi-source scraper(s) with checkpointing
+[ ] Bronze/Silver/Gold warehouse with dbt models + tests
+[ ] Airflow orchestration (DAGs + evidence of successful runs)
+[ ] BI dashboards + insights memo
+[ ] Trained models (price prediction, bargain detection, recommender) with
+    MLflow tracking + model cards
+[ ] REST API (catalog, predictions, recommendations, alerts) with docs and
+    tests
+[ ] Dockerized, CI/CD-deployed full stack
+[ ] Monitoring/observability dashboards
+[ ] Documentation: README, ARCHITECTURE.md, DECISIONS.md, data dictionary
+[ ] Case-study writeup + demo video
+
+================================================================================
+SUGGESTED TIMELINE
+================================================================================
+Week 1        Foundations
+Weeks 2-4     Data Engineering
+Weeks 4-5     Data Analysis (parallel with tail end of Data Engineering)
+Weeks 5-8     Data Science
+Weeks 8-10    Backend
+Weeks 10-12   Integration & Deployment
+Weeks 12-13   Observability & Documentation
+Weeks 13-14   Portfolio Packaging
+Total: ~14 weeks part-time - compress or stretch to your pace.
+
+================================================================================
+TECH STACK RECAP
+================================================================================
+Python, SQL, Kafka (stretch), Spark (stretch), Airflow, dbt, PostgreSQL +
+Snowflake/BigQuery (stretch), Delta Lake/Iceberg (stretch), scikit-learn/
+XGBoost, sentence-transformers, MLflow, Evidently AI, Redis, Celery,
+FastAPI/Django, Docker, Kubernetes (stretch), Terraform, GitHub Actions,
+Prometheus/Grafana, Power BI/Metabase/Looker Studio

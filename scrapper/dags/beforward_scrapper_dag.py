@@ -17,47 +17,57 @@ from __future__ import annotations
 
 import json
 import sys
-
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Dict
 
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.providers.postgres.operators.postgres import PostgresOperator
 
-from config import Config
-from models import PartListing
-from logger import get_logger
-from database import PostgresStore
-from scripts.client import ScraperClient
-from scripts.listing import discover_listings as _discover
-from scripts.detail import scrape_details as _scrape
-
 # Ensure the project source is on the path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-# Configuration
+# Configuration helpers
 
-CFG = Config.from_env()
-DATA_DIR = Path(CFG.data_dir)
+def _get_cfg():
+    """Build Config lazily — safe for Airflow worker processes."""
+    from config import Config
+    return Config.from_env()
+
+
+def _get_store(cfg):
+    from database import PostgresStore
+    return PostgresStore(cfg)
+
+
+def _get_logger(cfg):
+    from logger import get_logger
+    return get_logger("airflow.beforward", cfg.log_dir)
+
+
+DATA_DIR = Path("/opt/airflow/data")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
-
 URLS_PATH = DATA_DIR / "listing_urls.json"
 DETAILS_PATH = DATA_DIR / "scraped_details.json"
 
-# Airflow logger (goes to Airflow UI + file)
-logger = get_logger("airflow.beforward", CFG.log_dir)
+# Task callables
 
-def task_discover_listings(**context):   
-    """Discover new listing URLs and save to JSON file."""
+def task_discover_listings(**context) -> str:
+    from scripts.client import ScraperClient
+    from scripts.listing import discover_listings as _discover
+
+    cfg = _get_cfg()
+    logger = _get_logger(cfg)
     logger.info("Task: discover_listings started")
-    store = PostgresStore(CFG)
+
+    store = _get_store(cfg)
     known = store.known_ref_nos()
     logger.info(f"Known ref_nos in DB: {len(known)}")
 
-    with ScraperClient(CFG) as client:
-        urls = _discover(client, CFG, known_refs=known)
+    with ScraperClient(cfg) as client:
+        urls = _discover(client, cfg, known_refs=known)
 
     URLS_PATH.write_text(json.dumps(urls, indent=2), encoding="utf-8")
     logger.info(f"Discovered {len(urls)} new URLs → {URLS_PATH}")
@@ -65,19 +75,25 @@ def task_discover_listings(**context):
     context["ti"].xcom_push(key="url_count", value=len(urls))
     return str(URLS_PATH)
 
-def task_scrape_details(**context):
-    """Scrape listing details from URLs and save to JSON file."""
+
+def task_scrape_details(**context) -> str:
+    from scripts.client import ScraperClient
+    from scripts.detail import scrape_details as _scrape
+    from models import PartListing
+
+    cfg = _get_cfg()
+    logger = _get_logger(cfg)
     logger.info("Task: scrape_details started")
+
     urls = json.loads(URLS_PATH.read_text(encoding="utf-8"))
     if not urls:
         logger.info("No URLs to scrape; skipping.")
         DETAILS_PATH.write_text("[]", encoding="utf-8")
         return str(DETAILS_PATH)
 
-    with ScraperClient(CFG) as client:
-        listings = _scrape(client, urls, CFG)
+    with ScraperClient(cfg) as client:
+        listings = _scrape(client, urls, cfg)
 
-    # Serialize Pydantic models
     records = [listing.model_dump(mode="json") for listing in listings]
     DETAILS_PATH.write_text(json.dumps(records, indent=2, ensure_ascii=False), encoding="utf-8")
     logger.info(f"Scraped {len(records)} listings → {DETAILS_PATH}")
@@ -85,15 +101,20 @@ def task_scrape_details(**context):
     context["ti"].xcom_push(key="listing_count", value=len(records))
     return str(DETAILS_PATH)
 
-def task_load_bronze(**context):
-    """Load scraped details into Bronze table."""
+
+def task_load_bronze(**context) -> Dict[str, int]:
+    from models import PartListing
+
+    cfg = _get_cfg()
+    logger = _get_logger(cfg)
     logger.info("Task: load_bronze started")
+
     records = json.loads(DETAILS_PATH.read_text(encoding="utf-8"))
     if not records:
         logger.info("No records to load; skipping.")
         return {"bronze_inserted": 0}
 
-    store = PostgresStore(CFG)
+    store = _get_store(cfg)
     inserted = 0
     with store.session() as sess:
         for rec in records:
@@ -118,14 +139,16 @@ def task_load_bronze(**context):
     context["ti"].xcom_push(key="bronze_inserted", value=inserted)
     return {"bronze_inserted": inserted}
 
-def task_transform_silver(**context):
-    """Transform Bronze data into Silver tables."""
+
+def task_transform_silver(**context) -> Dict[str, int]:
+    cfg = _get_cfg()
+    logger = _get_logger(cfg)
     logger.info("Task: transform_silver started")
-    store = PostgresStore(CFG)
+
+    store = _get_store(cfg)
     total = 0
 
     with store.session() as sess:
-        # Parts
         r = sess.execute("""
             INSERT INTO silver.parts
             (ref_no, scraped_at, url, title, condition, make, model, product_name,
@@ -158,7 +181,6 @@ def task_transform_silver(**context):
         """)
         parts_ins = r.rowcount
 
-        # Prices
         r = sess.execute("""
             INSERT INTO silver.prices
             (ref_no, scraped_at, currency, original_price, current_price,
@@ -179,7 +201,6 @@ def task_transform_silver(**context):
         """)
         prices_ins = r.rowcount
 
-        # Shipping
         r = sess.execute("""
             INSERT INTO silver.shipping_options
             (ref_no, scraped_at, destination_port, freight_method, price,
@@ -195,7 +216,7 @@ def task_transform_silver(**context):
                 opt->>'eta',
                 opt->>'estimated_delivery'
             FROM bronze.listings_raw b,
-            LATERAL jsonb_array_elements(b.raw_json->'shipping'->'options') AS opt
+            LATERAL jsonb_array_elements((b.raw_json::jsonb)->'shipping'->'options') AS opt
             LEFT JOIN silver.shipping_options s
               ON s.ref_no = b.ref_no AND s.scraped_at = b.scraped_at
               AND s.destination_port = opt->>'destination_port'
@@ -203,7 +224,6 @@ def task_transform_silver(**context):
         """)
         ship_ins = r.rowcount
 
-        # Similar items
         r = sess.execute("""
             INSERT INTO silver.similar_items
             (listing_ref_no, scraped_at, similar_ref_no, name, url, image,
@@ -222,7 +242,7 @@ def task_transform_silver(**context):
                 sim->>'discount_label',
                 sim->>'tag'
             FROM bronze.listings_raw b,
-            LATERAL jsonb_array_elements(b.raw_json->'similar_items') AS sim
+            LATERAL jsonb_array_elements((b.raw_json::jsonb)->'similar_items') AS sim
             LEFT JOIN silver.similar_items s
               ON s.listing_ref_no = b.ref_no AND s.scraped_at = b.scraped_at
               AND s.similar_ref_no = sim->>'ref_no'
@@ -230,7 +250,6 @@ def task_transform_silver(**context):
         """)
         sim_ins = r.rowcount
 
-        # Images
         r = sess.execute("""
             INSERT INTO silver.images (ref_no, scraped_at, image_url)
             SELECT
@@ -238,14 +257,13 @@ def task_transform_silver(**context):
                 b.scraped_at,
                 img
             FROM bronze.listings_raw b,
-            LATERAL jsonb_array_elements_text(b.raw_json->'images') AS img
+            LATERAL jsonb_array_elements_text((b.raw_json::jsonb)->'images') AS img
             LEFT JOIN silver.images s
               ON s.ref_no = b.ref_no AND s.scraped_at = b.scraped_at AND s.image_url = img
             WHERE s.id IS NULL
         """)
         img_ins = r.rowcount
 
-        # Reviews
         r = sess.execute("""
             INSERT INTO silver.reviews
             (ref_no, scraped_at, review_id, rating, reviewer_name,
@@ -261,7 +279,7 @@ def task_transform_silver(**context):
                 (rev->>'verified_buyer')::boolean,
                 rev->>'text'
             FROM bronze.listings_raw b,
-            LATERAL jsonb_array_elements(b.raw_json->'reviews'->'reviews') AS rev
+            LATERAL jsonb_array_elements((b.raw_json::jsonb)->'reviews'->'reviews') AS rev
             LEFT JOIN silver.reviews s
               ON s.ref_no = b.ref_no AND s.scraped_at = b.scraped_at
               AND s.review_id = rev->>'review_id'
@@ -296,14 +314,15 @@ default_args = {
 }
 
 with DAG(
-    "beforward_scraper",
+    dag_id="beforward_parts_intelligence",
     default_args=default_args,
-    description="BE FORWARD incremental scraper DAG",
-    schedule_interval=timedelta(minutes=15),  # every 15 minutes
+    description="Incremental BE FORWARD scraper: Bronze → Silver → Gold",
+    schedule_interval=timedelta(minutes=15),
     catchup=False,
     max_active_runs=1,
-    tags=["scraper", "beforward"],
+    tags=["scraping", "beforward", "parts", "elt"],
 ) as dag:
+
     discover = PythonOperator(
         task_id="discover_listings",
         python_callable=task_discover_listings,
@@ -325,15 +344,12 @@ with DAG(
     )
 
     refresh_gold = PostgresOperator(
-        task_id="refresh_gold",
+        task_id="refresh_gold_views",
         postgres_conn_id="postgres_default",
         sql="""
-            REFRESH MATERIALIZED VIEW gold.parts_summary;
-            REFRESH MATERIALIZED VIEW gold.shipping_summary;
             REFRESH MATERIALIZED VIEW gold.daily_price_summary;
             REFRESH MATERIALIZED VIEW gold.shipping_cost_by_port;
         """,
     )
 
-    # Task Lineage
     discover >> scrape >> load_bronze >> transform_silver >> refresh_gold
