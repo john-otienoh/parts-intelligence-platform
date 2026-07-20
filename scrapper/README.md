@@ -1,77 +1,186 @@
-# Data Collection Layer
+# BE FORWARD Parts Intelligence — Production Scraper
 
-## Overview
+A maintainable, DRY, production-grade scraper for BE FORWARD auto-parts listings with:
 
-The Scraper module is responsible for acquiring raw automotive marketplace data. It is designed as a resilient, scalable ingestion service that collects product listings, prices, shipping information, and images while handling incremental updates, duplicates, and failures gracefully.
+* **PostgreSQL** bronze/silver/gold warehouse (no DuckDB lock-in)
+* **Incremental loading** — only new listings are scraped and inserted
+* **File-only logging** with rotation (no console spam)
+* **ETL + ELT** pipelines for flexibility
+* **Cron-ready** scheduler with idempotent runs
 
-## Supported Marketplaces
+---
 
-| Marketplace | Status    |
-| ----------- | --------- |
-| BeForward   | Supported |
-| eBay Motors | Planned   |
-| Yahoo Auctions JP | Planned |
-| Croooober   | Planned |
+## Quick Start
+
+### 1. Install dependencies
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+### 2. Set environment variables
+
+```bash
+export DATABASE_URL="postgresql://user:pass@localhost:5432/beforward"
+export MAX_PAGES=2          # search-result pages to crawl per run
+export LOG_DIR=logs
+export DATA_DIR=data
+```
+
+### 3. Initialise schema
+
+```bash
+python run_scheduled.py --mode elt --init-schema
+```
+
+### 4. Run manually
+
+```bash
+# ELT mode (recommended — transform in SQL)
+python run_scheduled.py --mode elt
+
+# ETL mode (transform in Python before loading)
+python run_scheduled.py --mode etl
+```
+
+### 5. Schedule with cron (every 15 minutes)
+
+```bash
+crontab -e
+```
+
+Add:
+
+```cron
+*/15 * * * * cd /path/to/beforward_scraper && /usr/bin/python3 run_scheduled.py --mode elt >> /dev/null 2>&1
+```
+
+> All output is written to `logs/scraper.log` and `logs/scraper_error.log`.  
+> `>> /dev/null 2>&1` is safe because nothing important goes to stdout.
+
+---
 
 ## Architecture
 
-```text
-Scheduler → Scraping Controller
-                │
-    ┌───────────┼───────────┐
-    ▼           ▼           ▼
- Product Spider  Shipping Spider  Image Spider
-    │           │           │
-    └───────────┼───────────┘
-                ▼
-        Data Normalization
-                ▼
-         Raw JSON Storage
-                ▼
-           Bronze Layer
+```
+┌─────────────┐     ┌──────────────┐     ┌─────────────────┐
+│  BE FORWARD │────▶│  Scraper     │────▶│  PostgreSQL     │
+│  Website    │     │  (Python)    │     │  Bronze (raw)   │
+└─────────────┘     └──────────────┘     └─────────────────┘
+                                                  │
+                    ┌─────────────────────────────┘
+                    ▼
+           ┌─────────────────┐
+           │  Silver (typed) │
+           │  parts, prices  │
+           │  shipping, etc. │
+           └─────────────────┘
+                    │
+                    ▼
+           ┌─────────────────┐
+           │  Gold (MVs)     │
+           │  daily summary  │
+           │  shipping stats │
+           └─────────────────┘
 ```
 
-## Workflow
+### Bronze (`bronze.listings_raw`)
+Immutable raw JSON landing area.  
+Primary key = `SHA256(ref_no | url | scraped_at)` — guarantees idempotency even if a listing is re-scraped.
 
-1. Load configuration (marketplace URLs, selectors, delays).
-2. Fetch listing pages and extract product URLs.
-3. Visit each listing, extract metadata, shipping info, and download images.
-4. Normalize output into a structured JSON schema.
-5. Validate data quality and save immutable raw files.
-6. Log session statistics.
+### Silver (`silver.*`)
+Normalised, typed tables:
+* `parts` — vehicle & part specifications
+* `prices` — price snapshots over time
+* `shipping_options` — freight quotes per port
+* `similar_items` — cross-sell recommendations
+* `images` — image URLs
+* `reviews` — customer reviews
 
-## Output Structure
+### Gold (`gold.*`)
+Materialised views for reporting:
+* `daily_price_summary` — latest price per listing per day
+* `shipping_cost_by_port` — aggregate freight statistics
 
-Each listing is stored as a JSON file:
+---
 
-```json
-{
-  "product": { "title": "...", "manufacturer": "...", ... },
-  "price": { "current": "...", "currency": "...", ... },
-  "shipping": { "cost": "...", "method": "...", ... },
-  "images": [ "url1", "url2" ],
-  "metadata": { "marketplace": "BeForward", "collected_at": "..." }
-}
+## Pipelines
+
+| Aspect | ETL (`etl_pipeline.py`) | ELT (`elt_pipeline.py`) |
+|--------|------------------------|------------------------|
+| Transform location | Python (Pydantic) | PostgreSQL (SQL) |
+| Bronze usage | Audit trail | Source of truth for replay |
+| Maintainability | Logic in Python | Logic in SQL (version with schema) |
+| Performance | More round-trips | Single bulk SQL per table |
+| Recommended for | Complex Python transforms | Standard normalisation |
+
+Both pipelines share the same scraper modules (`scraper/`) and produce identical Silver tables.
+
+---
+
+## Incremental Strategy
+
+1. Query `bronze.listings_raw` for all known `ref_no`s.
+2. Crawl search-result pages.
+3. Skip any listing whose `ref_no` is already known.
+4. Scrape details **only** for new listings.
+5. Insert with `ON CONFLICT DO NOTHING` as a safety net.
+
+This minimises load on BE FORWARD's servers and keeps runs fast.
+
+---
+
+## Logging
+
+All logs go to rotating files:
+
+* `logs/scraper.log` — INFO and above (max 10 MB × 5 backups)
+* `logs/scraper_error.log` — ERROR and above (max 10 MB × 5 backups)
+
+No console output.  
+Grep for `ETL_SUMMARY` or `ELT_SUMMARY` to see per-run metrics.
+
+---
+
+## Project Layout
+
+```
+beforward_scraper/
+├── config.py              # Environment-driven configuration
+├── logger.py              # File-only rotating logger
+├── database.py            # SQLAlchemy PostgreSQL store
+├── models.py              # Pydantic data models
+├── etl_pipeline.py        # Extract → Transform → Load
+├── elt_pipeline.py        # Extract → Load → Transform
+├── run_scheduled.py       # Cron entry point
+├── requirements.txt
+├── sql/
+│   └── schema.sql         # Bronze / Silver / Gold DDL
+├── scraper/
+│   ├── client.py          # HTTP session with retries
+│   ├── parser.py          # lxml parsing (pure functions)
+│   ├── listing.py         # URL discovery
+│   └── detail.py          # Detail-page scraping
+└── logs/                  # Rotating log files (gitignored)
 ```
 
-## Incremental & Duplicate Handling
+---
 
-- Tracked changes: price, shipping, availability.
-- Duplicate detection via marketplace reference number, URL, or business key.
-- Exponential backoff retry with configurable limits.
+## Notes
 
-## Running a Scrape
+* Be polite: randomised delays (0.8–1.5 s) and automatic retries on 429/5xx.
+* `data/` is optional — the pipelines stream directly into PostgreSQL.
+* To force a full re-scrape, truncate `bronze.listings_raw` (Silver tables use `ON CONFLICT DO NOTHING`, so they won't duplicate).
 
-```bash
-python scraper/run.py --marketplace beforward
-```
+---
 
-Logs and raw data are written to `scraper/data/`.
+## Airflow Orchestration
 
-## Configuration
+Two production DAGs are provided in `dags/`:
 
-Scraper settings (timeouts, concurrency, user agent) are in `scraper/config.py`. Respect the target website’s robots.txt and add appropriate delays.
+* `beforward_elt_pipeline` — recommended; SQL transforms inside Postgres
+* `beforward_etl_pipeline` — Python transforms before Silver load
 
-## Adding a New Marketplace
-
-Implement a new Spider class inheriting from `BaseSpider` and register it in the controller. See `spiders/_template.py` for guidance.
+See [`dags/README.md`](dags/README.md) for setup instructions.
